@@ -1,22 +1,26 @@
 import {
-    CandlestickSeries,
-    ColorType,
-    CrosshairMode,
-    LineSeries,
-    LineStyle,
-    createChart
+  AreaSeries,
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  LineSeries,
+  LineStyle,
+  PriceScaleMode,
+  createChart,
+  type AutoscaleInfo,
+  type UTCTimestamp
 } from "lightweight-charts";
 import {
-    Match,
-    Show,
-    Switch,
-    createEffect,
-    createMemo,
-    createSignal,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createMemo,
+  createSignal,
   onCleanup,
   onMount
 } from "solid-js";
-import { SearchableComboboxField } from "../../components/ui/SearchableComboboxField";
+import { SearchableComboboxField, type ComboboxOptionItem } from "../../components/ui/SearchableComboboxField";
 import { StateCard } from "../../components/ui/StateCard";
 import { fetchKlines, fetchTradingPairs, type CandlePoint, type TradingPairOption } from "../../shared/api/binance";
 import { copy } from "../../shared/copy";
@@ -24,17 +28,42 @@ import { calculateAhr999, type AhrPoint } from "../../shared/indicator/ahr999";
 import { formatPrice, formatRatio } from "../../shared/utils/formatters";
 
 type ViewMode = "loadingPairs" | "loadingData" | "error" | "empty" | "chart";
+type KlineInterval = "1h" | "4h" | "1d" | "1w" | "1M";
+
 interface LogicalRangeLike {
   from: number;
   to: number;
 }
 
-interface HoverChip {
-  text: string;
+interface FloatingTooltip {
+  left: number;
   top: number;
+  date: string;
+  dcaCost: number;
+  price: number;
+  ahr: number;
 }
 
-type KlineInterval = "1h" | "4h" | "1d" | "1w" | "1M";
+const FIXED_INTERVAL: KlineInterval = "1d";
+const KLINE_BATCH_SIZE = 500;
+const LOAD_MORE_THRESHOLD = 35;
+const LIVE_REFRESH_LIMIT = 10;
+const LIVE_REFRESH_INTERVAL_MS = 1000;
+const FULL_HISTORY_REQUEST_INTERVAL_MS = 300;
+const AHR_BOTTOM_VALUE = 0.45;
+const AHR_DCA_VALUE = 1.2;
+const AHR_OVERHEAT_VALUE = 5;
+const AHR_MIN_VALUE = 0.1;
+const AHR_MAX_PADDING_RATIO = 0.08;
+const OUTER_SCALE_MARGIN = 0.02;
+const PRICE_PANE_INDEX = 0;
+const AHR_PANE_INDEX = 1;
+const PRICE_PANE_STRETCH = 2;
+const AHR_PANE_STRETCH = 1;
+const SELECTED_SYMBOL_STORAGE_KEY = "ahr999-chart.selected-symbol";
+const STARRED_SYMBOLS_STORAGE_KEY = "ahr999-chart.starred-symbols";
+
+type StarredSymbols = Record<string, number>;
 
 const isAbortError = (error: unknown): boolean => {
   return error instanceof DOMException && error.name === "AbortError";
@@ -44,11 +73,71 @@ const clamp = (value: number, min: number, max: number): number => {
   return Math.min(max, Math.max(min, value));
 };
 
-const FIXED_INTERVAL: KlineInterval = "1d";
-const KLINE_BATCH_SIZE = 500;
-const LOAD_MORE_THRESHOLD = 35;
-const LIVE_REFRESH_LIMIT = 10;
-const LIVE_REFRESH_INTERVAL_MS = 1000;
+const formatCompactValue = (value: number): string => {
+  const absValue = Math.abs(value);
+
+  if (absValue >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(2)}M`;
+  }
+
+  if (absValue >= 1_000) {
+    return `${(value / 1_000).toFixed(2)}K`;
+  }
+
+  if (absValue >= 1) {
+    return value.toFixed(2);
+  }
+
+  return value.toFixed(4);
+};
+
+const formatUsdAxis = (value: number): string => `$${formatCompactValue(value)}`;
+
+const normalizeTime = (time: unknown): UTCTimestamp | null => {
+  if (typeof time === "number" && Number.isFinite(time)) {
+    return Math.floor(time) as UTCTimestamp;
+  }
+
+  if (typeof time === "object" && time !== null) {
+    const maybeBusinessDay = time as { year?: unknown; month?: unknown; day?: unknown };
+    if (
+      typeof maybeBusinessDay.year === "number" &&
+      typeof maybeBusinessDay.month === "number" &&
+      typeof maybeBusinessDay.day === "number"
+    ) {
+      return Math.floor(
+        Date.UTC(maybeBusinessDay.year, maybeBusinessDay.month - 1, maybeBusinessDay.day) / 1000
+      ) as UTCTimestamp;
+    }
+  }
+
+  return null;
+};
+
+const toSlashDate = (time: unknown): string => {
+  if (typeof time === "number") {
+    const date = new Date(time * 1000);
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(date.getUTCDate()).padStart(2, "0");
+    return `${year}/${month}/${day}`;
+  }
+
+  if (typeof time === "object" && time !== null) {
+    const maybeBusinessDay = time as { year?: unknown; month?: unknown; day?: unknown };
+    if (
+      typeof maybeBusinessDay.year === "number" &&
+      typeof maybeBusinessDay.month === "number" &&
+      typeof maybeBusinessDay.day === "number"
+    ) {
+      const month = String(maybeBusinessDay.month).padStart(2, "0");
+      const day = String(maybeBusinessDay.day).padStart(2, "0");
+      return `${maybeBusinessDay.year}/${month}/${day}`;
+    }
+  }
+
+  return "--/--/--";
+};
 
 const mergeCandles = (base: CandlePoint[], updates: CandlePoint[]): CandlePoint[] => {
   const byTime = new Map<number, CandlePoint>();
@@ -64,28 +153,285 @@ const mergeCandles = (base: CandlePoint[], updates: CandlePoint[]): CandlePoint[
   return [...byTime.values()].sort((a, b) => Number(a.time) - Number(b.time));
 };
 
+const delayWithAbort = (ms: number, signal?: AbortSignal): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", handleAbort);
+      resolve();
+    }, ms);
+
+    const handleAbort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", handleAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+
+    signal?.addEventListener("abort", handleAbort, { once: true });
+  });
+};
+
+const fetchAllHistoryKlines = async (
+  symbol: string,
+  interval: KlineInterval,
+  signal?: AbortSignal
+): Promise<CandlePoint[]> => {
+  const chunks: CandlePoint[][] = [];
+  let nextEndTime: number | undefined;
+  let earliestLoadedTime: number | null = null;
+
+  while (true) {
+    const batch = await fetchKlines(symbol, {
+      interval,
+      limit: KLINE_BATCH_SIZE,
+      endTime: nextEndTime,
+      signal
+    });
+
+    if (batch.length === 0) {
+      break;
+    }
+
+    const previousEarliest = earliestLoadedTime;
+    const filteredBatch: CandlePoint[] =
+      previousEarliest === null ? batch : batch.filter((item) => Number(item.time) < previousEarliest);
+
+    if (filteredBatch.length === 0) {
+      break;
+    }
+
+    chunks.unshift(filteredBatch);
+    earliestLoadedTime = Number(filteredBatch[0].time);
+
+    if (batch.length < KLINE_BATCH_SIZE) {
+      break;
+    }
+
+    const next = earliestLoadedTime * 1000 - 1;
+    if (!Number.isFinite(next) || next <= 0) {
+      break;
+    }
+
+    nextEndTime = Math.floor(next);
+    await delayWithAbort(FULL_HISTORY_REQUEST_INTERVAL_MS, signal);
+  }
+
+  return chunks.flat();
+};
+
+const calculateDcaCostSeries = (candles: CandlePoint[], lookback = 200): AhrPoint[] => {
+  if (candles.length === 0) {
+    return [];
+  }
+
+  let rollingSum = 0;
+  const points: AhrPoint[] = [];
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const current = candles[index];
+    rollingSum += current.close;
+
+    if (index >= lookback) {
+      rollingSum -= candles[index - lookback].close;
+    }
+
+    const windowSize = Math.min(index + 1, lookback);
+    points.push({
+      time: current.time,
+      value: rollingSum / windowSize
+    });
+  }
+
+  return points;
+};
+
+const extractValue = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const maybeLineData = value as { value?: unknown; close?: unknown };
+    if (typeof maybeLineData.value === "number" && Number.isFinite(maybeLineData.value)) {
+      return maybeLineData.value;
+    }
+
+    if (typeof maybeLineData.close === "number" && Number.isFinite(maybeLineData.close)) {
+      return maybeLineData.close;
+    }
+  }
+
+  return null;
+};
+
+const extractTime = (value: unknown): UTCTimestamp | null => {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const maybeData = value as { time?: unknown };
+  return normalizeTime(maybeData.time);
+};
+
+const readStoredSymbol = (): string => {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  try {
+    const stored = window.localStorage.getItem(SELECTED_SYMBOL_STORAGE_KEY);
+    return typeof stored === "string" ? stored.trim().toUpperCase() : "";
+  } catch {
+    return "";
+  }
+};
+
+const writeStoredSymbol = (symbol: string): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(SELECTED_SYMBOL_STORAGE_KEY, symbol);
+  } catch {
+    // Ignore localStorage write failures (private mode / quota).
+  }
+};
+
+const readStoredStarredSymbols = (): StarredSymbols => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(STARRED_SYMBOLS_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsed = JSON.parse(rawValue) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return {};
+    }
+
+    const result: StarredSymbols = {};
+    for (const [symbol, starredAt] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof symbol !== "string" || !symbol) {
+        continue;
+      }
+
+      if (typeof starredAt === "number" && Number.isFinite(starredAt) && starredAt > 0) {
+        result[symbol.toUpperCase()] = starredAt;
+      }
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+};
+
+const writeStoredStarredSymbols = (starredSymbols: StarredSymbols): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(STARRED_SYMBOLS_STORAGE_KEY, JSON.stringify(starredSymbols));
+  } catch {
+    // Ignore localStorage write failures (private mode / quota).
+  }
+};
+
 export const CryptoCandleAhrChart = () => {
   const [pairs, setPairs] = createSignal<TradingPairOption[]>([]);
   const [selectedSymbol, setSelectedSymbol] = createSignal("");
+  const [starredSymbols, setStarredSymbols] = createSignal<StarredSymbols>(readStoredStarredSymbols());
   const [candles, setCandles] = createSignal<CandlePoint[]>([]);
   const [ahrPoints, setAhrPoints] = createSignal<AhrPoint[]>([]);
+  const [dcaCostPoints, setDcaCostPoints] = createSignal<AhrPoint[]>([]);
   const [isPairsLoading, setIsPairsLoading] = createSignal(true);
   const [isDataLoading, setIsDataLoading] = createSignal(true);
   const [isRefreshing, setIsRefreshing] = createSignal(false);
   const [isLoadingMore, setIsLoadingMore] = createSignal(false);
   const [errorKind, setErrorKind] = createSignal<"error" | "empty" | null>(null);
-  const [hoverPriceChip, setHoverPriceChip] = createSignal<HoverChip | null>(null);
-  const [hoverAhrChip, setHoverAhrChip] = createSignal<HoverChip | null>(null);
+  const [floatingTooltip, setFloatingTooltip] = createSignal<FloatingTooltip | null>(null);
 
-  const pairOptions = createMemo(() =>
-    pairs().map((pair) => ({
+  const pairOptions = createMemo<ComboboxOptionItem[]>(() => {
+    const starredMap = starredSymbols();
+    const orderedPairs = [...pairs()].sort((left, right) => {
+      const leftStarredAt = starredMap[left.symbol];
+      const rightStarredAt = starredMap[right.symbol];
+      const leftIsStarred = typeof leftStarredAt === "number";
+      const rightIsStarred = typeof rightStarredAt === "number";
+
+      if (leftIsStarred && rightIsStarred) {
+        if (leftStarredAt !== rightStarredAt) {
+          return leftStarredAt - rightStarredAt;
+        }
+
+        return left.symbol.localeCompare(right.symbol, "en");
+      }
+
+      if (leftIsStarred) {
+        return -1;
+      }
+
+      if (rightIsStarred) {
+        return 1;
+      }
+
+      return left.symbol.localeCompare(right.symbol, "en");
+    });
+
+    return orderedPairs.map((pair) => ({
       value: pair.symbol,
-      label: pair.symbol
-    }))
+      label: pair.symbol,
+      isStarred: typeof starredMap[pair.symbol] === "number"
+    }));
+  });
+
+  const dynamicAhrMax = createMemo(() => {
+    let maxValue = Math.max(AHR_DCA_VALUE, AHR_OVERHEAT_VALUE);
+
+    for (const point of ahrPoints()) {
+      if (Number.isFinite(point.value) && point.value > maxValue) {
+        maxValue = point.value;
+      }
+    }
+
+    const paddedMax = maxValue * (1 + AHR_MAX_PADDING_RATIO);
+    return Math.max(AHR_DCA_VALUE, AHR_OVERHEAT_VALUE, paddedMax);
+  });
+
+  const selectedAsset = createMemo(() => {
+    const symbol = selectedSymbol();
+    const matchedPair = pairs().find((pair) => pair.symbol === symbol);
+
+    if (matchedPair?.baseAsset) {
+      return matchedPair.baseAsset.toUpperCase();
+    }
+
+    if (symbol.endsWith("USDT")) {
+      return symbol.slice(0, -4).toUpperCase();
+    }
+
+    return symbol ? symbol.toUpperCase() : "BTC";
+  });
+
+  const appTitle = createMemo(() => copy.appTitleByAsset(selectedAsset()));
+  const loadingDataDescription = createMemo(() => copy.loadingDataDescriptionByAsset(selectedAsset()));
+  const legendPriceLabel = createMemo(() => copy.legendPriceByAsset(selectedAsset()));
+  const legendAhrLabel = createMemo(() => copy.legendAhrIndexByAsset(selectedAsset()));
+
+  const hasChartData = createMemo(
+    () => candles().length > 0 && ahrPoints().length > 0 && dcaCostPoints().length > 0
   );
-  const latestClose = createMemo(() => candles().at(-1)?.close ?? null);
-  const latestAhr = createMemo(() => ahrPoints().at(-1)?.value ?? null);
-  const hasChartData = createMemo(() => candles().length > 0 && ahrPoints().length > 0);
+
   const viewMode = createMemo<ViewMode>(() => {
     if (isPairsLoading()) {
       return "loadingPairs";
@@ -108,12 +454,15 @@ export const CryptoCandleAhrChart = () => {
 
   let chartHostRef: HTMLDivElement | undefined;
   let chartApi: ReturnType<typeof createChart> | null = null;
-  let candleSeries: any = null;
+  let priceSeries: any = null;
+  let dcaCostSeries: any = null;
   let ahrSeries: any = null;
+  let dangerZoneSeries: any = null;
   let currentPriceLine: any = null;
   let currentAhrLine: any = null;
   let bottomLine: any = null;
   let dcaLine: any = null;
+  let overheatLine: any = null;
   let pairRequestController: AbortController | null = null;
   let dataRequestController: AbortController | null = null;
   let liveRequestController: AbortController | null = null;
@@ -124,30 +473,58 @@ export const CryptoCandleAhrChart = () => {
   let pendingPreserveRange: LogicalRangeLike | null = null;
   let pendingRangeShift = 0;
   let logicalRangeHandler: ((range: unknown) => void) | null = null;
+  let crosshairHandler: ((param: any) => void) | null = null;
+  let lastRequestedSymbol = "";
 
-  const onResize = () => applyPaneHeights();
-
-  const clearHover = () => {
-    setHoverPriceChip(null);
-    setHoverAhrChip(null);
-  };
-
-  const applyPaneHeights = () => {
+  const onResize = () => {
     if (!chartApi || !chartHostRef) {
       return;
     }
 
-    const panes = chartApi.panes();
-    if (panes.length < 2) {
-      return;
+    chartApi.applyOptions({
+      width: chartHostRef.clientWidth,
+      height: chartHostRef.clientHeight
+    });
+  };
+
+  const clearHover = () => {
+    setFloatingTooltip(null);
+  };
+
+  const clearChartData = () => {
+    setCandles([]);
+    setAhrPoints([]);
+    setDcaCostPoints([]);
+    clearHover();
+    clearReferenceLines();
+  };
+
+  const abortInFlightRequests = (includePairRequest = false) => {
+    if (includePairRequest) {
+      pairRequestController?.abort();
+      pairRequestController = null;
     }
 
-    const hostHeight = chartHostRef.clientHeight;
-    const upperHeight = Math.max(260, Math.round(hostHeight * 0.68));
-    const lowerHeight = Math.max(150, Math.round(hostHeight * 0.32));
+    dataRequestController?.abort();
+    dataRequestController = null;
 
-    panes[0].setHeight(upperHeight);
-    panes[1].setHeight(lowerHeight);
+    liveRequestController?.abort();
+    liveRequestController = null;
+  };
+
+  const stopAndClearData = (includePairRequest = false) => {
+    // Invalidate stale async responses before starting a new symbol load.
+    requestCounter += 1;
+    abortInFlightRequests(includePairRequest);
+    setIsDataLoading(false);
+    setIsRefreshing(false);
+    setIsLoadingMore(false);
+    setErrorKind(null);
+    hasMoreHistory = false;
+    pendingPreserveRange = null;
+    pendingRangeShift = 0;
+    shouldFitContentOnNextRender = true;
+    clearChartData();
   };
 
   const removeLine = (series: any, line: any): null => {
@@ -159,14 +536,15 @@ export const CryptoCandleAhrChart = () => {
   };
 
   const clearReferenceLines = () => {
-    currentPriceLine = removeLine(candleSeries, currentPriceLine);
+    currentPriceLine = removeLine(priceSeries, currentPriceLine);
     currentAhrLine = removeLine(ahrSeries, currentAhrLine);
     bottomLine = removeLine(ahrSeries, bottomLine);
     dcaLine = removeLine(ahrSeries, dcaLine);
+    overheatLine = removeLine(ahrSeries, overheatLine);
   };
 
   const updateReferenceLines = () => {
-    if (!candleSeries || !ahrSeries) {
+    if (!priceSeries || !ahrSeries) {
       return;
     }
 
@@ -176,9 +554,9 @@ export const CryptoCandleAhrChart = () => {
     const lastAhr = ahrPoints().at(-1);
 
     if (lastCandle) {
-      currentPriceLine = candleSeries.createPriceLine({
+      currentPriceLine = priceSeries.createPriceLine({
         price: lastCandle.close,
-        color: "rgba(248, 113, 113, 0.88)",
+        color: "rgba(220, 228, 241, 0.78)",
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
@@ -189,7 +567,7 @@ export const CryptoCandleAhrChart = () => {
     if (lastAhr) {
       currentAhrLine = ahrSeries.createPriceLine({
         price: lastAhr.value,
-        color: "rgba(251, 191, 36, 0.95)",
+        color: "rgba(91, 135, 255, 0.9)",
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
@@ -198,47 +576,66 @@ export const CryptoCandleAhrChart = () => {
     }
 
     bottomLine = ahrSeries.createPriceLine({
-      price: 0.45,
-      color: "rgba(56, 189, 248, 0.9)",
+      price: AHR_BOTTOM_VALUE,
+      color: "#ff3d77",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: copy.ahrBottomLine
+      title: `${copy.legendBottomLine} 0.45`
     });
 
     dcaLine = ahrSeries.createPriceLine({
-      price: 1.2,
-      color: "rgba(163, 230, 53, 0.9)",
+      price: AHR_DCA_VALUE,
+      color: "#6dcf6d",
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: copy.ahrDcaLine
+      title: `${copy.legendDcaLine} 1.20`
+    });
+
+    overheatLine = ahrSeries.createPriceLine({
+      price: AHR_OVERHEAT_VALUE,
+      color: "#f6b44f",
+      lineWidth: 1,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: `${copy.legendOverheatLine} 5.00`
     });
   };
 
   const renderChartData = () => {
-    if (!candleSeries || !ahrSeries || !chartApi) {
+    if (!chartApi || !priceSeries || !dcaCostSeries || !ahrSeries || !dangerZoneSeries) {
       return;
     }
 
     const candlePoints = candles();
     const indicatorPoints = ahrPoints();
+    const dcaPoints = dcaCostPoints();
 
-    if (candlePoints.length === 0 || indicatorPoints.length === 0) {
-      candleSeries.setData([]);
+    if (candlePoints.length === 0 || indicatorPoints.length === 0 || dcaPoints.length === 0) {
+      priceSeries.setData([]);
+      dcaCostSeries.setData([]);
       ahrSeries.setData([]);
+      dangerZoneSeries.setData([]);
       clearReferenceLines();
       clearHover();
       return;
     }
 
-    candleSeries.setData(
+    priceSeries.setData(
       candlePoints.map((point) => ({
         time: point.time,
         open: point.open,
         high: point.high,
         low: point.low,
         close: point.close
+      }))
+    );
+
+    dcaCostSeries.setData(
+      dcaPoints.map((point) => ({
+        time: point.time,
+        value: point.value
       }))
     );
 
@@ -249,9 +646,16 @@ export const CryptoCandleAhrChart = () => {
       }))
     );
 
-    updateReferenceLines();
-    const timeScaleApi = chartApi.timeScale() as any;
+    dangerZoneSeries.setData(
+      candlePoints.map((point) => ({
+        time: point.time,
+        value: AHR_BOTTOM_VALUE
+      }))
+    );
 
+    updateReferenceLines();
+
+    const timeScaleApi = chartApi.timeScale() as any;
     if (
       pendingPreserveRange &&
       pendingRangeShift > 0 &&
@@ -267,8 +671,6 @@ export const CryptoCandleAhrChart = () => {
       timeScaleApi.fitContent();
       shouldFitContentOnNextRender = false;
     }
-
-    applyPaneHeights();
   };
 
   const initializeChart = () => {
@@ -281,87 +683,211 @@ export const CryptoCandleAhrChart = () => {
       layout: {
         background: {
           type: ColorType.Solid,
-          color: "rgba(10, 20, 30, 0.9)"
+          color: "#040c1b"
         },
-        textColor: "rgba(235, 244, 251, 0.9)",
-        fontFamily: "\"Avenir Next\", \"Trebuchet MS\", \"Segoe UI\", sans-serif"
+        textColor: "#dce2ef",
+        fontFamily: '"Noto Sans TC", "Avenir Next", "Trebuchet MS", sans-serif',
+        panes: {
+          enableResize: false,
+          separatorColor: "rgba(220, 226, 239, 0.1)",
+          separatorHoverColor: "rgba(220, 226, 239, 0.1)"
+        }
       },
       grid: {
         vertLines: {
-          color: "rgba(106, 125, 147, 0.16)"
+          color: "rgba(127, 145, 176, 0.08)",
+          style: LineStyle.Dashed
         },
         horzLines: {
-          color: "rgba(106, 125, 147, 0.2)"
+          color: "rgba(127, 145, 176, 0.18)",
+          style: LineStyle.Dashed
+        }
+      },
+      leftPriceScale: {
+        visible: false,
+        borderVisible: false,
+        mode: PriceScaleMode.Logarithmic,
+        scaleMargins: {
+          top: OUTER_SCALE_MARGIN,
+          bottom: OUTER_SCALE_MARGIN
         }
       },
       rightPriceScale: {
-        borderVisible: false
+        visible: true,
+        borderVisible: false,
+        mode: PriceScaleMode.Logarithmic,
+        scaleMargins: {
+          top: OUTER_SCALE_MARGIN,
+          bottom: OUTER_SCALE_MARGIN
+        }
       },
       timeScale: {
         borderVisible: false,
         timeVisible: true,
-        rightOffset: 8
+        rightOffset: 4
       },
       crosshair: {
-        mode: CrosshairMode.Normal,
+        mode: CrosshairMode.Magnet,
         vertLine: {
-          color: "rgba(148, 163, 184, 0.52)",
+          color: "rgba(224, 233, 248, 0.52)",
           width: 1,
           style: LineStyle.Dashed,
-          labelBackgroundColor: "rgba(30, 41, 59, 0.92)"
+          labelBackgroundColor: "rgba(3, 9, 20, 0.95)"
         },
         horzLine: {
-          color: "rgba(148, 163, 184, 0.52)",
+          color: "rgba(224, 233, 248, 0.52)",
           width: 1,
           style: LineStyle.Dashed,
-          labelBackgroundColor: "rgba(30, 41, 59, 0.92)"
+          labelBackgroundColor: "rgba(3, 9, 20, 0.95)"
         }
       }
     });
 
-    candleSeries = chartApi.addSeries(
+    dangerZoneSeries = chartApi.addSeries(
+      AreaSeries,
+      {
+        lineColor: "rgba(0, 0, 0, 0)",
+        topColor: "rgba(255, 77, 132, 0.02)",
+        bottomColor: "rgba(255, 77, 132, 0.14)",
+        lineWidth: 1,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        priceScaleId: "right",
+        priceFormat: {
+          type: "custom",
+          minMove: 0.0001,
+          formatter: formatCompactValue
+        }
+      },
+      AHR_PANE_INDEX
+    );
+
+    priceSeries = chartApi.addSeries(
       CandlestickSeries,
       {
-        upColor: "#2dd4bf",
-        downColor: "#f87171",
-        borderVisible: false,
-        wickUpColor: "#2dd4bf",
-        wickDownColor: "#f87171",
+        upColor: "#5cbf87",
+        downColor: "#e57b7b",
+        wickUpColor: "#5cbf87",
+        wickDownColor: "#e57b7b",
+        borderUpColor: "#5cbf87",
+        borderDownColor: "#e57b7b",
         priceLineVisible: false,
-        lastValueVisible: true
+        lastValueVisible: true,
+        priceScaleId: "right",
+        priceFormat: {
+          type: "custom",
+          minMove: 0.0001,
+          formatter: formatUsdAxis
+        }
       },
-      0
+      PRICE_PANE_INDEX
+    );
+
+    dcaCostSeries = chartApi.addSeries(
+      LineSeries,
+      {
+        color: "#d2d9e2",
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: true,
+        crosshairMarkerRadius: 5,
+        crosshairMarkerBorderColor: "#f0f5ff",
+        crosshairMarkerBackgroundColor: "#d2d9e2",
+        priceScaleId: "right",
+        priceFormat: {
+          type: "custom",
+          minMove: 0.0001,
+          formatter: formatUsdAxis
+        }
+      },
+      PRICE_PANE_INDEX
     );
 
     ahrSeries = chartApi.addSeries(
       LineSeries,
       {
-        color: "#fbbf24",
+        color: "#5b87ff",
         lineWidth: 2,
-        crosshairMarkerVisible: true,
-        crosshairMarkerRadius: 3,
         priceLineVisible: false,
         lastValueVisible: true,
+        crosshairMarkerVisible: true,
+        crosshairMarkerRadius: 5,
+        crosshairMarkerBorderColor: "#e4ecff",
+        crosshairMarkerBackgroundColor: "#5b87ff",
+        priceScaleId: "right",
         priceFormat: {
-          type: "price",
-          precision: 3,
-          minMove: 0.001
+          type: "custom",
+          minMove: 0.0001,
+          formatter: formatCompactValue
         }
       },
-      1
+      AHR_PANE_INDEX
     );
 
     ahrSeries.applyOptions({
-      autoscaleInfoProvider: () => ({
-        priceRange: {
-          minValue: 0,
-          maxValue: 2
+      autoscaleInfoProvider: (baseImplementation: () => AutoscaleInfo | null) => {
+        const baseInfo = baseImplementation();
+        const computedMax = dynamicAhrMax();
+
+        if (!baseInfo?.priceRange) {
+          return {
+            priceRange: {
+              minValue: AHR_MIN_VALUE,
+              maxValue: computedMax
+            }
+          };
         }
-      })
+
+        return {
+          ...baseInfo,
+          priceRange: {
+            minValue: AHR_MIN_VALUE,
+            maxValue: Math.max(baseInfo.priceRange.maxValue, computedMax)
+          }
+        };
+      }
     } as any);
 
-    chartApi.subscribeCrosshairMove((param) => {
-      if (!chartHostRef || !candleSeries || !ahrSeries) {
+    const panes = chartApi.panes();
+    if (panes.length > 1) {
+      panes[PRICE_PANE_INDEX].setStretchFactor(PRICE_PANE_STRETCH);
+      panes[AHR_PANE_INDEX].setStretchFactor(AHR_PANE_STRETCH);
+    }
+
+    chartApi.priceScale("right", PRICE_PANE_INDEX).applyOptions({
+      visible: true,
+      borderVisible: false,
+      mode: PriceScaleMode.Logarithmic,
+      scaleMargins: {
+        top: OUTER_SCALE_MARGIN,
+        bottom: 0.04
+      }
+    });
+
+    chartApi.priceScale("right", AHR_PANE_INDEX).applyOptions({
+      visible: true,
+      borderVisible: false,
+      mode: PriceScaleMode.Logarithmic,
+      scaleMargins: {
+        top: OUTER_SCALE_MARGIN,
+        bottom: OUTER_SCALE_MARGIN
+      }
+    });
+
+    chartApi.priceScale("left", PRICE_PANE_INDEX).applyOptions({
+      visible: false,
+      borderVisible: false
+    });
+
+    chartApi.priceScale("left", AHR_PANE_INDEX).applyOptions({
+      visible: false,
+      borderVisible: false
+    });
+
+    crosshairHandler = (param) => {
+      if (!chartHostRef || !priceSeries || !dcaCostSeries || !ahrSeries) {
         clearHover();
         return;
       }
@@ -371,45 +897,44 @@ export const CryptoCandleAhrChart = () => {
         return;
       }
 
-      const candleData = param.seriesData.get(candleSeries) as
-        | { open: number; high: number; low: number; close: number }
-        | undefined;
-      const ahrData = param.seriesData.get(ahrSeries) as { value: number } | undefined;
+      const priceEntry = param.seriesData.get(priceSeries);
+      const dcaEntry = param.seriesData.get(dcaCostSeries);
+      const ahrEntry = param.seriesData.get(ahrSeries);
+      const priceData = extractValue(priceEntry);
+      const dcaData = extractValue(dcaEntry);
+      const ahrData = extractValue(ahrEntry);
+      const hoveredTime = extractTime(priceEntry) ?? normalizeTime(param.time);
 
-      if (!candleData || !ahrData) {
+      if (priceData === null || dcaData === null || ahrData === null || hoveredTime === null) {
         clearHover();
         return;
       }
 
-      const chartHeight = chartHostRef.clientHeight;
-      const candleCoordinate = candleSeries.priceToCoordinate(candleData.close);
-      const ahrCoordinate = ahrSeries.priceToCoordinate(ahrData.value);
+      const hostHeight = chartHostRef.clientHeight;
+      const hostWidth = chartHostRef.clientWidth;
+      const tooltipWidth = 360;
+      const tooltipHeight = 248;
+      const left = clamp(param.point.x + 18, 14, Math.max(14, hostWidth - tooltipWidth - 14));
+      const tipTop = clamp(param.point.y + 18, 14, Math.max(14, hostHeight - tooltipHeight - 14));
 
-      if (candleCoordinate !== null) {
-        setHoverPriceChip({
-          top: clamp(candleCoordinate - 14, 6, chartHeight - 30),
-          text: `${copy.metricOpen} ${formatPrice(candleData.open)} · ${copy.metricHigh} ${formatPrice(candleData.high)} · ${copy.metricLow} ${formatPrice(candleData.low)} · ${copy.metricClose} ${formatPrice(candleData.close)}`
-        });
-      } else {
-        setHoverPriceChip(null);
-      }
+      setFloatingTooltip({
+        left,
+        top: tipTop,
+        date: toSlashDate(hoveredTime),
+        dcaCost: dcaData,
+        price: priceData,
+        ahr: ahrData
+      });
+    };
 
-      if (ahrCoordinate !== null) {
-        setHoverAhrChip({
-          top: clamp(ahrCoordinate - 14, 6, chartHeight - 30),
-          text: `${copy.hoverAhrLabel} ${formatRatio(ahrData.value)}`
-        });
-      } else {
-        setHoverAhrChip(null);
-      }
-    });
+    chartApi.subscribeCrosshairMove(crosshairHandler);
 
     logicalRangeHandler = (range) => {
-      if (!range || !candleSeries || isDataLoading() || isLoadingMore() || !hasMoreHistory) {
+      if (!range || !priceSeries || isDataLoading() || isLoadingMore() || !hasMoreHistory) {
         return;
       }
 
-      const barsInfo = candleSeries.barsInLogicalRange(range as any);
+      const barsInfo = priceSeries.barsInLogicalRange(range as any);
       if (!barsInfo) {
         return;
       }
@@ -421,9 +946,8 @@ export const CryptoCandleAhrChart = () => {
         }
       }
     };
-    (chartApi.timeScale() as any).subscribeVisibleLogicalRangeChange(logicalRangeHandler);
 
-    applyPaneHeights();
+    (chartApi.timeScale() as any).subscribeVisibleLogicalRangeChange(logicalRangeHandler);
     renderChartData();
 
     if (!resizeListenerBound) {
@@ -444,6 +968,27 @@ export const CryptoCandleAhrChart = () => {
       const result = await fetchTradingPairs(controller.signal);
       setPairs(result);
 
+      const validSymbols = new Set(result.map((item) => item.symbol));
+      setStarredSymbols((current) => {
+        let hasRemovedSymbol = false;
+        const next: StarredSymbols = {};
+
+        for (const [symbol, starredAt] of Object.entries(current)) {
+          if (validSymbols.has(symbol)) {
+            next[symbol] = starredAt;
+          } else {
+            hasRemovedSymbol = true;
+          }
+        }
+
+        if (!hasRemovedSymbol) {
+          return current;
+        }
+
+        writeStoredStarredSymbols(next);
+        return next;
+      });
+
       if (result.length === 0) {
         setSelectedSymbol("");
         setErrorKind("empty");
@@ -451,9 +996,11 @@ export const CryptoCandleAhrChart = () => {
       }
 
       const current = selectedSymbol();
+      const stored = readStoredSymbol();
+      const storedSymbol = result.some((item) => item.symbol === stored) ? stored : "";
       const keptSymbol = result.some((item) => item.symbol === current) ? current : "";
       const defaultSymbol = result.find((item) => item.symbol === "BTCUSDT")?.symbol ?? result[0].symbol;
-      setSelectedSymbol(keptSymbol || defaultSymbol);
+      setSelectedSymbol(storedSymbol || keptSymbol || defaultSymbol);
     } catch (error) {
       if (!isAbortError(error)) {
         setPairs([]);
@@ -472,6 +1019,7 @@ export const CryptoCandleAhrChart = () => {
     if (!symbol) {
       setCandles([]);
       setAhrPoints([]);
+      setDcaCostPoints([]);
       setErrorKind("empty");
       hasMoreHistory = false;
       return;
@@ -498,11 +1046,7 @@ export const CryptoCandleAhrChart = () => {
     }
 
     try {
-      const candlePoints = await fetchKlines(symbol, {
-        interval,
-        limit: KLINE_BATCH_SIZE,
-        signal: controller.signal
-      });
+      const candlePoints = await fetchAllHistoryKlines(symbol, interval, controller.signal);
 
       if (nextRequestId !== requestCounter) {
         return;
@@ -511,15 +1055,19 @@ export const CryptoCandleAhrChart = () => {
       if (candlePoints.length === 0) {
         setCandles([]);
         setAhrPoints([]);
+        setDcaCostPoints([]);
         setErrorKind("empty");
         hasMoreHistory = false;
         return;
       }
 
       const indicator = calculateAhr999(candlePoints);
-      if (indicator.length === 0) {
+      const dcaCosts = calculateDcaCostSeries(candlePoints);
+
+      if (indicator.length === 0 || dcaCosts.length === 0) {
         setCandles([]);
         setAhrPoints([]);
+        setDcaCostPoints([]);
         setErrorKind("empty");
         hasMoreHistory = false;
         return;
@@ -527,12 +1075,14 @@ export const CryptoCandleAhrChart = () => {
 
       setCandles(candlePoints);
       setAhrPoints(indicator);
+      setDcaCostPoints(dcaCosts);
       setErrorKind(null);
-      hasMoreHistory = candlePoints.length >= KLINE_BATCH_SIZE;
+      hasMoreHistory = false;
     } catch (error) {
       if (!isAbortError(error)) {
         setCandles([]);
         setAhrPoints([]);
+        setDcaCostPoints([]);
         setErrorKind("error");
         hasMoreHistory = false;
       }
@@ -600,6 +1150,7 @@ export const CryptoCandleAhrChart = () => {
       const mergedCandles = [...prepend, ...existing];
       setCandles(mergedCandles);
       setAhrPoints(calculateAhr999(mergedCandles));
+      setDcaCostPoints(calculateDcaCostSeries(mergedCandles));
       hasMoreHistory = prepend.length >= KLINE_BATCH_SIZE;
     } catch (error) {
       if (!isAbortError(error)) {
@@ -641,6 +1192,7 @@ export const CryptoCandleAhrChart = () => {
       const mergedCandles = mergeCandles(candles(), latestCandles);
       setCandles(mergedCandles);
       setAhrPoints(calculateAhr999(mergedCandles));
+      setDcaCostPoints(calculateDcaCostSeries(mergedCandles));
     } catch (error) {
       if (!isAbortError(error)) {
         // Keep last successful chart state for transient polling failures.
@@ -666,10 +1218,46 @@ export const CryptoCandleAhrChart = () => {
     void loadMarketData(symbol, FIXED_INTERVAL);
   };
 
+  const toggleStarredSymbol = (symbol: string) => {
+    if (!symbol) {
+      return;
+    }
+
+    setStarredSymbols((current) => {
+      const normalizedSymbol = symbol.trim().toUpperCase();
+      const next: StarredSymbols = { ...current };
+
+      if (typeof next[normalizedSymbol] === "number") {
+        delete next[normalizedSymbol];
+      } else {
+        next[normalizedSymbol] = Date.now();
+      }
+
+      writeStoredStarredSymbols(next);
+      return next;
+    });
+  };
+
+  createEffect(() => {
+    const symbol = selectedSymbol();
+    if (!symbol) {
+      return;
+    }
+
+    writeStoredSymbol(symbol);
+  });
+
   createEffect(() => {
     const symbol = selectedSymbol();
     if (!symbol || isPairsLoading()) {
       return;
+    }
+
+    const isSwitchingSymbol = lastRequestedSymbol !== "" && lastRequestedSymbol !== symbol;
+    lastRequestedSymbol = symbol;
+
+    if (isSwitchingSymbol) {
+      stopAndClearData(false);
     }
 
     void loadMarketData(symbol, FIXED_INTERVAL);
@@ -691,20 +1279,26 @@ export const CryptoCandleAhrChart = () => {
   createEffect(() => {
     candles();
     ahrPoints();
+    dcaCostPoints();
     renderChartData();
   });
 
   onCleanup(() => {
-    pairRequestController?.abort();
-    dataRequestController?.abort();
-    liveRequestController?.abort();
-    clearReferenceLines();
+    stopAndClearData(true);
+
+    if (chartApi && crosshairHandler) {
+      chartApi.unsubscribeCrosshairMove(crosshairHandler);
+      crosshairHandler = null;
+    }
+
     if (chartApi && logicalRangeHandler) {
       (chartApi.timeScale() as any).unsubscribeVisibleLogicalRangeChange(logicalRangeHandler);
       logicalRangeHandler = null;
     }
+
     chartApi?.remove();
     chartApi = null;
+
     if (resizeListenerBound) {
       window.removeEventListener("resize", onResize);
       resizeListenerBound = false;
@@ -716,15 +1310,12 @@ export const CryptoCandleAhrChart = () => {
   });
 
   return (
-    <section class="dashboard-card">
-      <header class="dashboard-header">
-        <div class="headline">
-          <h1>{copy.appTitle}</h1>
+    <section class="dashboard-card chart-reference-card">
+      <header class="dashboard-header chart-reference-header">
+        <div class="headline chart-title-group">
+          <h1>{appTitle()}</h1>
+          <p>{copy.appSubtitle}</p>
         </div>
-        <div class="formula-badge">{copy.ahrFormulaNotice}</div>
-      </header>
-
-      <div class="toolbar">
         <SearchableComboboxField
           label={copy.symbolLabel}
           options={pairOptions()}
@@ -732,47 +1323,107 @@ export const CryptoCandleAhrChart = () => {
           disabled={isPairsLoading() || pairs().length === 0}
           placeholder={copy.symbolSearchPlaceholder}
           triggerAriaLabel={copy.openSymbolSelector}
+          onToggleOptionStar={toggleStarredSymbol}
+          optionStarButtonAriaLabel={(option) =>
+            option.isStarred ? copy.unstarPairBySymbol(option.label) : copy.starPairBySymbol(option.label)
+          }
           onChange={(value) => setSelectedSymbol(value)}
         />
-        <span class="history-hint">{copy.fixedIntervalLabel}</span>
+      </header>
+
+      <div class="series-legend">
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-dca" />
+          {copy.legendDcaCost}
+        </span>
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-price" />
+          {legendPriceLabel()}
+        </span>
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-ahr" />
+          {legendAhrLabel()}
+        </span>
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-bottom" />
+          {copy.legendBottomLine}
+        </span>
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-dca-line" />
+          {copy.legendDcaLine}
+        </span>
+        <span class="legend-item">
+          <i class="legend-swatch legend-swatch-overheat" />
+          {copy.legendOverheatLine}
+        </span>
+      </div>
+
+      <div class="toolbar chart-reference-toolbar">
+        <span class="refresh-badge">{copy.fixedIntervalLabel}</span>
         <Show when={isRefreshing()}>
           <span class="refresh-badge">{copy.refreshingData}</span>
         </Show>
+        <span class={`history-hint ${isLoadingMore() ? "active" : ""}`}>
+          {isLoadingMore() ? copy.loadingMore : copy.loadMoreHint}
+        </span>
       </div>
 
-      <div class="metric-ribbon">
-        <article>
-          <h3>{copy.latestClose}</h3>
-          <p>{latestClose() === null ? "--" : formatPrice(latestClose()!)}</p>
-        </article>
-        <article>
-          <h3>{copy.latestAhr}</h3>
-          <p>{latestAhr() === null ? "--" : formatRatio(latestAhr()!)}</p>
-        </article>
-      </div>
-
-      <div class="chart-shell">
+      <div class="chart-shell chart-reference-shell">
         <div
-          class="chart-host"
+          class="chart-host chart-reference-host"
           ref={(element) => {
             chartHostRef = element;
             initializeChart();
           }}
         />
 
-        <Show when={hoverPriceChip()}>
-          {(chip) => (
-            <div class="floating-chip floating-chip-price" style={{ top: `${chip().top}px` }}>
-              {chip().text}
-            </div>
-          )}
-        </Show>
-
-        <Show when={hoverAhrChip()}>
-          {(chip) => (
-            <div class="floating-chip floating-chip-ahr" style={{ top: `${chip().top}px` }}>
-              {chip().text}
-            </div>
+        <Show when={floatingTooltip()}>
+          {(tooltip) => (
+            <article class="chart-tooltip" style={{ left: `${tooltip().left}px`, top: `${tooltip().top}px` }}>
+              <h4>{tooltip().date}</h4>
+              <p>
+                <span>
+                  <i class="dot dot-dca" />
+                  {copy.legendDcaCost}
+                </span>
+                <strong>{formatPrice(tooltip().dcaCost)}</strong>
+              </p>
+              <p>
+                <span>
+                  <i class="dot dot-price" />
+                  {legendPriceLabel()}
+                </span>
+                <strong>{formatPrice(tooltip().price)}</strong>
+              </p>
+              <p>
+                <span>
+                  <i class="dot dot-ahr" />
+                  {legendAhrLabel()}
+                </span>
+                <strong>{formatRatio(tooltip().ahr)}</strong>
+              </p>
+              <p>
+                <span>
+                  <i class="dot dot-bottom" />
+                  {copy.legendBottomLine}
+                </span>
+                <strong>{formatRatio(AHR_BOTTOM_VALUE)}</strong>
+              </p>
+              <p>
+                <span>
+                  <i class="dot dot-dca-line" />
+                  {copy.legendDcaLine}
+                </span>
+                <strong>{formatRatio(AHR_DCA_VALUE)}</strong>
+              </p>
+              <p>
+                <span>
+                  <i class="dot dot-overheat" />
+                  {copy.legendOverheatLine}
+                </span>
+                <strong>{formatRatio(AHR_OVERHEAT_VALUE)}</strong>
+              </p>
+            </article>
           )}
         </Show>
 
@@ -780,15 +1431,10 @@ export const CryptoCandleAhrChart = () => {
           <div class="chart-overlay">
             <Switch>
               <Match when={viewMode() === "loadingPairs"}>
-                <StateCard
-                  title={copy.loadingPairsTitle}
-                  description={copy.loadingPairsDescription}
-                  actionLabel={copy.retryButton}
-                  onAction={retryRequest}
-                />
+                <StateCard title={copy.loadingPairsTitle} description={copy.loadingPairsDescription} />
               </Match>
               <Match when={viewMode() === "loadingData"}>
-                <StateCard title={copy.loadingDataTitle} description={copy.loadingDataDescription} />
+                <StateCard title={copy.loadingDataTitle} description={loadingDataDescription()} />
               </Match>
               <Match when={viewMode() === "error"}>
                 <StateCard

@@ -1,9 +1,10 @@
 import { Combobox as ComboboxPrimitive } from "@kobalte/core/combobox";
-import { createMemo } from "solid-js";
+import { Show, createMemo } from "solid-js";
 
 export interface ComboboxOptionItem {
   value: string;
   label: string;
+  isStarred?: boolean;
 }
 
 interface SearchableComboboxFieldProps {
@@ -14,6 +15,8 @@ interface SearchableComboboxFieldProps {
   placeholder: string;
   triggerAriaLabel: string;
   onChange: (value: string) => void;
+  onToggleOptionStar?: (value: string) => void;
+  optionStarButtonAriaLabel?: (option: ComboboxOptionItem) => string;
 }
 
 export const SearchableComboboxField = (props: SearchableComboboxFieldProps) => {
@@ -36,7 +39,34 @@ export const SearchableComboboxField = (props: SearchableComboboxFieldProps) => 
       disabled={props.disabled}
       itemComponent={(itemProps: any) => (
         <ComboboxPrimitive.Item item={itemProps.item} class="combo-item">
-          <ComboboxPrimitive.ItemLabel>{itemProps.item.rawValue.label}</ComboboxPrimitive.ItemLabel>
+          <div class="combo-item-content">
+            <Show when={props.onToggleOptionStar}>
+              <button
+                type="button"
+                class={`combo-star-button ${itemProps.item.rawValue.isStarred ? "is-starred" : ""}`}
+                aria-label={
+                  props.optionStarButtonAriaLabel?.(itemProps.item.rawValue) ??
+                  (itemProps.item.rawValue.isStarred
+                    ? `取消 ${itemProps.item.rawValue.label} 星號`
+                    : `將 ${itemProps.item.rawValue.label} 設為星號`)
+                }
+                disabled={props.disabled}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  props.onToggleOptionStar?.(itemProps.item.rawValue.value);
+                }}
+              >
+                {itemProps.item.rawValue.isStarred ? "★" : "☆"}
+              </button>
+            </Show>
+            <ComboboxPrimitive.ItemLabel class="combo-item-label">
+              {itemProps.item.rawValue.label}
+            </ComboboxPrimitive.ItemLabel>
+          </div>
         </ComboboxPrimitive.Item>
       )}
     >
