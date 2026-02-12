@@ -39,8 +39,6 @@ body {
 
 .dashboard-card {
   width: min(1840px, 100%);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
   background: linear-gradient(180deg, rgba(7, 18, 36, 0.88), rgba(4, 12, 24, 0.94));
   padding: 10px 12px 12px;
 }
@@ -187,22 +185,6 @@ body {
 .combo-control:focus-within {
   border-color: rgba(104, 167, 255, 0.86);
   box-shadow: 0 0 0 2px rgba(63, 127, 224, 0.22);
-}
-
-.combo-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-left: 1px solid rgba(127, 147, 177, 0.34);
-  background: transparent;
-  color: var(--text-soft);
-  width: 32px;
-  cursor: pointer;
-}
-
-.combo-trigger-icon {
-  font-size: 0.74rem;
 }
 
 .combo-content {
@@ -369,6 +351,51 @@ body {
   display: grid;
   place-items: center;
   background: rgba(5, 10, 18, 0.62);
+}
+
+.chart-loading-indicator {
+  position: absolute;
+  z-index: 7;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(4, 10, 20, 0.48);
+  pointer-events: none;
+  text-align: center;
+}
+
+.chart-loading-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(180, 198, 224, 0.28);
+  border-top-color: rgba(222, 236, 255, 0.92);
+  animation: spin 0.8s linear infinite;
+}
+
+.chart-loading-indicator p {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #e5edf9;
+}
+
+.chart-loading-indicator small {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .state-card {

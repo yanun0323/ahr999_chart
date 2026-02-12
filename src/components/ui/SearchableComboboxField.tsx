@@ -13,7 +13,6 @@ interface SearchableComboboxFieldProps {
   value: string;
   disabled?: boolean;
   placeholder: string;
-  triggerAriaLabel: string;
   onChange: (value: string) => void;
   onToggleOptionStar?: (value: string) => void;
   optionStarButtonAriaLabel?: (option: ComboboxOptionItem) => string;
@@ -32,6 +31,7 @@ export const SearchableComboboxField = (props: SearchableComboboxFieldProps) => 
       optionLabel="label"
       optionTextValue="label"
       multiple={false}
+      triggerMode="focus"
       value={selectedOption()}
       onChange={(nextValue: ComboboxOptionItem | null) => props.onChange(nextValue?.value ?? "")}
       placeholder={props.placeholder}
@@ -77,9 +77,6 @@ export const SearchableComboboxField = (props: SearchableComboboxFieldProps) => 
 
       <ComboboxPrimitive.Control class="combo-control">
         <ComboboxPrimitive.Input class="combo-input" />
-        <ComboboxPrimitive.Trigger class="combo-trigger" aria-label={props.triggerAriaLabel}>
-          <span class="combo-trigger-icon">▾</span>
-        </ComboboxPrimitive.Trigger>
       </ComboboxPrimitive.Control>
 
       <ComboboxPrimitive.Portal>

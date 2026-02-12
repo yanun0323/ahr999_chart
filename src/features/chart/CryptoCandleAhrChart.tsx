@@ -248,32 +248,70 @@ const calculateDcaCostSeries = (candles: CandlePoint[], lookback = 200): AhrPoin
   return points;
 };
 
-const extractValue = (value: unknown): number | null => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+const extractSeriesValue = (entry: unknown): number | null => {
+  if (typeof entry === "number" && Number.isFinite(entry)) {
+    return entry;
   }
 
-  if (typeof value === "object" && value !== null) {
-    const maybeLineData = value as { value?: unknown; close?: unknown };
-    if (typeof maybeLineData.value === "number" && Number.isFinite(maybeLineData.value)) {
-      return maybeLineData.value;
-    }
+  if (typeof entry !== "object" || entry === null) {
+    return null;
+  }
 
-    if (typeof maybeLineData.close === "number" && Number.isFinite(maybeLineData.close)) {
-      return maybeLineData.close;
-    }
+  const maybeEntry = entry as { value?: unknown; close?: unknown };
+  if (typeof maybeEntry.value === "number" && Number.isFinite(maybeEntry.value)) {
+    return maybeEntry.value;
+  }
+
+  if (typeof maybeEntry.close === "number" && Number.isFinite(maybeEntry.close)) {
+    return maybeEntry.close;
   }
 
   return null;
 };
 
-const extractTime = (value: unknown): UTCTimestamp | null => {
-  if (typeof value !== "object" || value === null) {
+const extractSeriesTime = (entry: unknown): UTCTimestamp | null => {
+  if (typeof entry !== "object" || entry === null) {
     return null;
   }
 
-  const maybeData = value as { time?: unknown };
-  return normalizeTime(maybeData.time);
+  return normalizeTime((entry as { time?: unknown }).time);
+};
+
+const findNearestTimeKey = (sortedTimes: number[], targetTime: number): number | null => {
+  if (sortedTimes.length === 0 || !Number.isFinite(targetTime)) {
+    return null;
+  }
+
+  let left = 0;
+  let right = sortedTimes.length - 1;
+
+  while (left <= right) {
+    const middle = left + Math.floor((right - left) / 2);
+    const middleValue = sortedTimes[middle];
+
+    if (middleValue === targetTime) {
+      return middleValue;
+    }
+
+    if (middleValue < targetTime) {
+      left = middle + 1;
+    } else {
+      right = middle - 1;
+    }
+  }
+
+  const rightValue = right >= 0 ? sortedTimes[right] : null;
+  const leftValue = left < sortedTimes.length ? sortedTimes[left] : null;
+
+  if (rightValue === null) {
+    return leftValue;
+  }
+
+  if (leftValue === null) {
+    return rightValue;
+  }
+
+  return Math.abs(targetTime - rightValue) <= Math.abs(leftValue - targetTime) ? rightValue : leftValue;
 };
 
 const readStoredSymbol = (): string => {
@@ -435,6 +473,29 @@ export const CryptoCandleAhrChart = () => {
   const hasChartData = createMemo(
     () => candles().length > 0 && ahrPoints().length > 0 && dcaCostPoints().length > 0
   );
+  const isHistoryLoading = createMemo(() => isDataLoading() || isLoadingMore());
+  const candlesByTime = createMemo(() => {
+    const table = new Map<number, CandlePoint>();
+    for (const candle of candles()) {
+      table.set(Number(candle.time), candle);
+    }
+    return table;
+  });
+  const dcaByTime = createMemo(() => {
+    const table = new Map<number, number>();
+    for (const point of dcaCostPoints()) {
+      table.set(Number(point.time), point.value);
+    }
+    return table;
+  });
+  const ahrByTime = createMemo(() => {
+    const table = new Map<number, number>();
+    for (const point of ahrPoints()) {
+      table.set(Number(point.time), point.value);
+    }
+    return table;
+  });
+  const candleTimeKeys = createMemo(() => candles().map((item) => Number(item.time)));
 
   const viewMode = createMemo<ViewMode>(() => {
     if (isPairsLoading()) {
@@ -446,7 +507,7 @@ export const CryptoCandleAhrChart = () => {
     }
 
     if (isDataLoading() && !hasChartData()) {
-      return "loadingData";
+      return "chart";
     }
 
     if (errorKind() === "empty" || !hasChartData()) {
@@ -876,15 +937,38 @@ export const CryptoCandleAhrChart = () => {
         return;
       }
 
-      const priceEntry = param.seriesData.get(priceSeries);
-      const dcaEntry = param.seriesData.get(dcaCostSeries);
-      const ahrEntry = param.seriesData.get(ahrSeries);
-      const priceData = extractValue(priceEntry);
-      const dcaData = extractValue(dcaEntry);
-      const ahrData = extractValue(ahrEntry);
-      const hoveredTime = extractTime(priceEntry) ?? normalizeTime(param.time);
+      const priceEntry = param.seriesData?.get?.(priceSeries);
+      const dcaEntry = param.seriesData?.get?.(dcaCostSeries);
+      const ahrEntry = param.seriesData?.get?.(ahrSeries);
 
-      if (priceData === null || dcaData === null || ahrData === null || hoveredTime === null) {
+      const resolvedTime =
+        normalizeTime(param.time) ??
+        extractSeriesTime(priceEntry) ??
+        extractSeriesTime(dcaEntry) ??
+        extractSeriesTime(ahrEntry);
+
+      if (resolvedTime === null) {
+        clearHover();
+        return;
+      }
+
+      let timeKey = Number(resolvedTime);
+      if (!candlesByTime().has(timeKey)) {
+        const nearestTimeKey = findNearestTimeKey(candleTimeKeys(), timeKey);
+        if (nearestTimeKey !== null) {
+          timeKey = nearestTimeKey;
+        }
+      }
+
+      const hoveredCandle = candlesByTime().get(timeKey) ?? null;
+      const hoveredDca = dcaByTime().get(timeKey);
+      const hoveredAhr = ahrByTime().get(timeKey);
+
+      const resolvedPrice = extractSeriesValue(priceEntry) ?? hoveredCandle?.close ?? null;
+      const resolvedDca = extractSeriesValue(dcaEntry) ?? (hoveredDca ?? null);
+      const resolvedAhr = extractSeriesValue(ahrEntry) ?? (hoveredAhr ?? null);
+
+      if (resolvedPrice === null || resolvedDca === null || resolvedAhr === null) {
         clearHover();
         return;
       }
@@ -893,16 +977,16 @@ export const CryptoCandleAhrChart = () => {
       const hostWidth = chartHostRef.clientWidth;
       const tooltipWidth = 360;
       const tooltipHeight = 248;
-      const left = clamp(param.point.x + 18, 14, Math.max(14, hostWidth - tooltipWidth - 14));
+      const left = clamp(param.point.x - tooltipWidth - 18, 14, Math.max(14, hostWidth - tooltipWidth - 14));
       const tipTop = clamp(param.point.y + 18, 14, Math.max(14, hostHeight - tooltipHeight - 14));
 
       setFloatingTooltip({
         left,
         top: tipTop,
-        date: toSlashDate(hoveredTime),
-        dcaCost: dcaData,
-        price: priceData,
-        ahr: ahrData
+        date: toSlashDate(timeKey),
+        dcaCost: resolvedDca,
+        price: resolvedPrice,
+        ahr: resolvedAhr
       });
     };
 
@@ -1296,7 +1380,6 @@ export const CryptoCandleAhrChart = () => {
           value={selectedSymbol()}
           disabled={isPairsLoading() || pairs().length === 0}
           placeholder={copy.symbolSearchPlaceholder}
-          triggerAriaLabel={copy.openSymbolSelector}
           onToggleOptionStar={toggleStarredSymbol}
           optionStarButtonAriaLabel={(option) =>
             option.isStarred ? copy.unstarPairBySymbol(option.label) : copy.starPairBySymbol(option.label)
@@ -1391,14 +1474,19 @@ export const CryptoCandleAhrChart = () => {
           )}
         </Show>
 
+        <Show when={isHistoryLoading()}>
+          <div class="chart-loading-indicator" aria-live="polite">
+            <span class="chart-loading-spinner" aria-hidden="true" />
+            <p>{isLoadingMore() ? copy.loadingMore : copy.loadingDataTitle}</p>
+            <small>{loadingDataDescription()}</small>
+          </div>
+        </Show>
+
         <Show when={viewMode() !== "chart"}>
           <div class="chart-overlay">
             <Switch>
               <Match when={viewMode() === "loadingPairs"}>
                 <StateCard title={copy.loadingPairsTitle} description={copy.loadingPairsDescription} />
-              </Match>
-              <Match when={viewMode() === "loadingData"}>
-                <StateCard title={copy.loadingDataTitle} description={loadingDataDescription()} />
               </Match>
               <Match when={viewMode() === "error"}>
                 <StateCard

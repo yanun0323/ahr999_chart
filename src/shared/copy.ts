@@ -1,5 +1,5 @@
 export const copy = {
-  appTitleByAsset: (asset: string) => `${asset} AHR999 指標`,
+  appTitleByAsset: (asset: string) => `AHR999 指標`,
   appSubtitle: "幣安現貨歷史資料（USDT 交易對）",
   symbolLabel: "交易對",
   symbolSearchPlaceholder: "搜尋交易對...",
