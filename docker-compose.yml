@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        VITE_BASE_PATH: "${VITE_BASE_PATH:-/}"
     ports:
       - "${APP_PORT:-5200}:8080"
     restart: unless-stopped

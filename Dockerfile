@@ -7,6 +7,8 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY . .
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=${VITE_BASE_PATH}
 RUN bun run build
 
 FROM nginxinc/nginx-unprivileged:1.27.5-alpine AS runtime
