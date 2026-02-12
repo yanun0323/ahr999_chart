@@ -3,20 +3,26 @@
 *.DS_STORE
 
 # VSCode settings
-*.vscode
+.vscode/**
+!.vscode/pull-request-task/
+!.vscode/pull-request-task/**/
+!.vscode/pull-request-task/**/PR_**
 
 # Golang
+*.cache
 go.work
 
 # Python
 .venv
 __pycache__
 
+# Frontend
+*.run
+
 # Log
 *.log
 
 # Agent
-AGENTS*.md
 SPEC.md
 TASK.md
 .reference

@@ -787,7 +787,7 @@ export const CryptoCandleAhrChart = () => {
         rightOffset: 4
       },
       crosshair: {
-        mode: CrosshairMode.Magnet,
+        mode: CrosshairMode.Normal,
         vertLine: {
           color: "rgba(224, 233, 248, 0.52)",
           width: 1,
@@ -927,7 +927,8 @@ export const CryptoCandleAhrChart = () => {
     });
 
     crosshairHandler = (param) => {
-      if (!chartHostRef || !priceSeries || !dcaCostSeries || !ahrSeries) {
+      const activeChart = chartApi;
+      if (!activeChart || !chartHostRef || !priceSeries || !dcaCostSeries || !ahrSeries) {
         clearHover();
         return;
       }
@@ -937,38 +938,10 @@ export const CryptoCandleAhrChart = () => {
         return;
       }
 
-      const priceEntry = param.seriesData?.get?.(priceSeries);
-      const dcaEntry = param.seriesData?.get?.(dcaCostSeries);
-      const ahrEntry = param.seriesData?.get?.(ahrSeries);
-
-      const resolvedTime =
-        normalizeTime(param.time) ??
-        extractSeriesTime(priceEntry) ??
-        extractSeriesTime(dcaEntry) ??
-        extractSeriesTime(ahrEntry);
-
-      if (resolvedTime === null) {
-        clearHover();
-        return;
-      }
-
-      let timeKey = Number(resolvedTime);
-      if (!candlesByTime().has(timeKey)) {
-        const nearestTimeKey = findNearestTimeKey(candleTimeKeys(), timeKey);
-        if (nearestTimeKey !== null) {
-          timeKey = nearestTimeKey;
-        }
-      }
-
-      const hoveredCandle = candlesByTime().get(timeKey) ?? null;
-      const hoveredDca = dcaByTime().get(timeKey);
-      const hoveredAhr = ahrByTime().get(timeKey);
-
-      const resolvedPrice = extractSeriesValue(priceEntry) ?? hoveredCandle?.close ?? null;
-      const resolvedDca = extractSeriesValue(dcaEntry) ?? (hoveredDca ?? null);
-      const resolvedAhr = extractSeriesValue(ahrEntry) ?? (hoveredAhr ?? null);
-
-      if (resolvedPrice === null || resolvedDca === null || resolvedAhr === null) {
+      const candleList = candles();
+      const dcaList = dcaCostPoints();
+      const ahrList = ahrPoints();
+      if (candleList.length === 0 || dcaList.length === 0 || ahrList.length === 0) {
         clearHover();
         return;
       }
@@ -980,13 +953,62 @@ export const CryptoCandleAhrChart = () => {
       const left = clamp(param.point.x - tooltipWidth - 18, 14, Math.max(14, hostWidth - tooltipWidth - 14));
       const tipTop = clamp(param.point.y + 18, 14, Math.max(14, hostHeight - tooltipHeight - 14));
 
+      const timeScaleApi = activeChart.timeScale() as any;
+      const logicalFromTimeScale = timeScaleApi?.coordinateToLogical?.(param.point.x);
+      const visibleLogicalRange = timeScaleApi?.getVisibleLogicalRange?.() as
+        | LogicalRangeLike
+        | null
+        | undefined;
+      const logicalFromVisibleRange =
+        visibleLogicalRange &&
+        Number.isFinite(visibleLogicalRange.from) &&
+        Number.isFinite(visibleLogicalRange.to) &&
+        hostWidth > 0
+          ? visibleLogicalRange.from +
+            (visibleLogicalRange.to - visibleLogicalRange.from) * clamp(param.point.x / hostWidth, 0, 1)
+          : null;
+
+      const logicalFromEvent = (() => {
+        if (typeof param.logical === "number" && Number.isFinite(param.logical)) {
+          return param.logical;
+        }
+        if (typeof logicalFromTimeScale === "number" && Number.isFinite(logicalFromTimeScale)) {
+          return logicalFromTimeScale;
+        }
+        if (typeof logicalFromVisibleRange === "number" && Number.isFinite(logicalFromVisibleRange)) {
+          return logicalFromVisibleRange;
+        }
+        return null;
+      })();
+
+      if (logicalFromEvent === null) {
+        clearHover();
+        return;
+      }
+
+      const hoveredIndex = clamp(Math.round(logicalFromEvent), 0, candleList.length - 1);
+      const hoveredCandle = candleList[hoveredIndex];
+      const hoveredDca = dcaList[hoveredIndex]?.value;
+      const hoveredAhr = ahrList[hoveredIndex]?.value;
+
+      if (
+        !hoveredCandle ||
+        typeof hoveredDca !== "number" ||
+        !Number.isFinite(hoveredDca) ||
+        typeof hoveredAhr !== "number" ||
+        !Number.isFinite(hoveredAhr)
+      ) {
+        clearHover();
+        return;
+      }
+
       setFloatingTooltip({
         left,
         top: tipTop,
-        date: toSlashDate(timeKey),
-        dcaCost: resolvedDca,
-        price: resolvedPrice,
-        ahr: resolvedAhr
+        date: toSlashDate(hoveredCandle.time),
+        dcaCost: hoveredDca,
+        price: hoveredCandle.close,
+        ahr: hoveredAhr
       });
     };
 
@@ -1426,7 +1448,7 @@ export const CryptoCandleAhrChart = () => {
 
         <Show when={floatingTooltip()}>
           {(tooltip) => (
-            <article class="chart-tooltip" style={{ left: `${tooltip().left}px`, top: `${tooltip().top}px` }}>
+            <article class="chart-tooltip">
               <h4>{tooltip().date}</h4>
               <p>
                 <span>

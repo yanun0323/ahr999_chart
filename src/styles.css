@@ -273,6 +273,8 @@ body {
 .chart-tooltip {
   position: absolute;
   z-index: 6;
+  top: 14px;
+  left: 14px;
   width: 280px;
   max-width: min(92vw, 280px);
   border: 1px solid rgba(117, 135, 163, 0.45);
