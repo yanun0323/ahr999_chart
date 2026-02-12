@@ -1,24 +1,24 @@
 import {
-  AreaSeries,
-  CandlestickSeries,
-  ColorType,
-  CrosshairMode,
-  LineSeries,
-  LineStyle,
-  PriceScaleMode,
-  createChart,
-  type AutoscaleInfo,
-  type UTCTimestamp
+    AreaSeries,
+    CandlestickSeries,
+    ColorType,
+    CrosshairMode,
+    LineSeries,
+    LineStyle,
+    PriceScaleMode,
+    createChart,
+    type AutoscaleInfo,
+    type UTCTimestamp
 } from "lightweight-charts";
 import {
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createMemo,
-  createSignal,
-  onCleanup,
-  onMount
+    Match,
+    Show,
+    Switch,
+    createEffect,
+    createMemo,
+    createSignal,
+    onCleanup,
+    onMount
 } from "solid-js";
 import { SearchableComboboxField, type ComboboxOptionItem } from "../../components/ui/SearchableComboboxField";
 import { StateCard } from "../../components/ui/StateCard";
@@ -55,11 +55,10 @@ const AHR_DCA_VALUE = 1.2;
 const AHR_OVERHEAT_VALUE = 5;
 const AHR_MIN_VALUE = 0.1;
 const AHR_MAX_PADDING_RATIO = 0.08;
-const OUTER_SCALE_MARGIN = 0.02;
-const PRICE_PANE_INDEX = 0;
-const AHR_PANE_INDEX = 1;
-const PRICE_PANE_STRETCH = 2;
-const AHR_PANE_STRETCH = 1;
+const PRICE_SCALE_TOP_MARGIN = 0;
+const PRICE_SCALE_BOTTOM_MARGIN = 0.2;
+const AHR_SCALE_TOP_MARGIN = 0.5;
+const AHR_SCALE_BOTTOM_MARGIN = 0;
 const SELECTED_SYMBOL_STORAGE_KEY = "ahr999-chart.selected-symbol";
 const STARRED_SYMBOLS_STORAGE_KEY = "ahr999-chart.starred-symbols";
 
@@ -427,6 +426,11 @@ export const CryptoCandleAhrChart = () => {
   const loadingDataDescription = createMemo(() => copy.loadingDataDescriptionByAsset(selectedAsset()));
   const legendPriceLabel = createMemo(() => copy.legendPriceByAsset(selectedAsset()));
   const legendAhrLabel = createMemo(() => copy.legendAhrIndexByAsset(selectedAsset()));
+  const valuationModeLabel = createMemo(() =>
+    selectedAsset() === "BTC"
+      ? copy.valuationModeBitcoin
+      : copy.valuationModePowerLawByAsset(selectedAsset())
+  );
 
   const hasChartData = createMemo(
     () => candles().length > 0 && ahrPoints().length > 0 && dcaCostPoints().length > 0
@@ -581,7 +585,7 @@ export const CryptoCandleAhrChart = () => {
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: `${copy.legendBottomLine} 0.45`
+      title: `${copy.legendBottomLine}`
     });
 
     dcaLine = ahrSeries.createPriceLine({
@@ -590,7 +594,7 @@ export const CryptoCandleAhrChart = () => {
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: `${copy.legendDcaLine} 1.20`
+      title: `${copy.legendDcaLine}`
     });
 
     overheatLine = ahrSeries.createPriceLine({
@@ -599,7 +603,7 @@ export const CryptoCandleAhrChart = () => {
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: `${copy.legendOverheatLine} 5.00`
+      title: `${copy.legendOverheatLine}`
     });
   };
 
@@ -686,12 +690,7 @@ export const CryptoCandleAhrChart = () => {
           color: "#040c1b"
         },
         textColor: "#dce2ef",
-        fontFamily: '"Noto Sans TC", "Avenir Next", "Trebuchet MS", sans-serif',
-        panes: {
-          enableResize: false,
-          separatorColor: "rgba(220, 226, 239, 0.1)",
-          separatorHoverColor: "rgba(220, 226, 239, 0.1)"
-        }
+        fontFamily: '"Noto Sans TC", "Avenir Next", "Trebuchet MS", sans-serif'
       },
       grid: {
         vertLines: {
@@ -704,12 +703,12 @@ export const CryptoCandleAhrChart = () => {
         }
       },
       leftPriceScale: {
-        visible: false,
+        visible: true,
         borderVisible: false,
         mode: PriceScaleMode.Logarithmic,
         scaleMargins: {
-          top: OUTER_SCALE_MARGIN,
-          bottom: OUTER_SCALE_MARGIN
+          top: AHR_SCALE_TOP_MARGIN,
+          bottom: AHR_SCALE_BOTTOM_MARGIN
         }
       },
       rightPriceScale: {
@@ -717,8 +716,8 @@ export const CryptoCandleAhrChart = () => {
         borderVisible: false,
         mode: PriceScaleMode.Logarithmic,
         scaleMargins: {
-          top: OUTER_SCALE_MARGIN,
-          bottom: OUTER_SCALE_MARGIN
+          top: PRICE_SCALE_TOP_MARGIN,
+          bottom: PRICE_SCALE_BOTTOM_MARGIN
         }
       },
       timeScale: {
@@ -753,14 +752,13 @@ export const CryptoCandleAhrChart = () => {
         lastValueVisible: false,
         priceLineVisible: false,
         crosshairMarkerVisible: false,
-        priceScaleId: "right",
+        priceScaleId: "left",
         priceFormat: {
           type: "custom",
           minMove: 0.0001,
           formatter: formatCompactValue
         }
-      },
-      AHR_PANE_INDEX
+      }
     );
 
     priceSeries = chartApi.addSeries(
@@ -780,8 +778,7 @@ export const CryptoCandleAhrChart = () => {
           minMove: 0.0001,
           formatter: formatUsdAxis
         }
-      },
-      PRICE_PANE_INDEX
+      }
     );
 
     dcaCostSeries = chartApi.addSeries(
@@ -801,29 +798,27 @@ export const CryptoCandleAhrChart = () => {
           minMove: 0.0001,
           formatter: formatUsdAxis
         }
-      },
-      PRICE_PANE_INDEX
+      }
     );
 
     ahrSeries = chartApi.addSeries(
       LineSeries,
       {
         color: "#5b87ff",
-        lineWidth: 2,
+        lineWidth: 1,
         priceLineVisible: false,
         lastValueVisible: true,
         crosshairMarkerVisible: true,
         crosshairMarkerRadius: 5,
         crosshairMarkerBorderColor: "#e4ecff",
         crosshairMarkerBackgroundColor: "#5b87ff",
-        priceScaleId: "right",
+        priceScaleId: "left",
         priceFormat: {
           type: "custom",
           minMove: 0.0001,
           formatter: formatCompactValue
         }
-      },
-      AHR_PANE_INDEX
+      }
     );
 
     ahrSeries.applyOptions({
@@ -850,40 +845,24 @@ export const CryptoCandleAhrChart = () => {
       }
     } as any);
 
-    const panes = chartApi.panes();
-    if (panes.length > 1) {
-      panes[PRICE_PANE_INDEX].setStretchFactor(PRICE_PANE_STRETCH);
-      panes[AHR_PANE_INDEX].setStretchFactor(AHR_PANE_STRETCH);
-    }
-
-    chartApi.priceScale("right", PRICE_PANE_INDEX).applyOptions({
+    chartApi.priceScale("right").applyOptions({
       visible: true,
       borderVisible: false,
       mode: PriceScaleMode.Logarithmic,
       scaleMargins: {
-        top: OUTER_SCALE_MARGIN,
-        bottom: 0.04
+        top: PRICE_SCALE_TOP_MARGIN,
+        bottom: PRICE_SCALE_BOTTOM_MARGIN
       }
     });
 
-    chartApi.priceScale("right", AHR_PANE_INDEX).applyOptions({
+    chartApi.priceScale("left").applyOptions({
       visible: true,
       borderVisible: false,
       mode: PriceScaleMode.Logarithmic,
       scaleMargins: {
-        top: OUTER_SCALE_MARGIN,
-        bottom: OUTER_SCALE_MARGIN
+        top: AHR_SCALE_TOP_MARGIN,
+        bottom: AHR_SCALE_BOTTOM_MARGIN
       }
-    });
-
-    chartApi.priceScale("left", PRICE_PANE_INDEX).applyOptions({
-      visible: false,
-      borderVisible: false
-    });
-
-    chartApi.priceScale("left", AHR_PANE_INDEX).applyOptions({
-      visible: false,
-      borderVisible: false
     });
 
     crosshairHandler = (param) => {
@@ -970,23 +949,15 @@ export const CryptoCandleAhrChart = () => {
 
       const validSymbols = new Set(result.map((item) => item.symbol));
       setStarredSymbols((current) => {
-        let hasRemovedSymbol = false;
         const next: StarredSymbols = {};
 
         for (const [symbol, starredAt] of Object.entries(current)) {
           if (validSymbols.has(symbol)) {
             next[symbol] = starredAt;
-          } else {
-            hasRemovedSymbol = true;
           }
         }
 
-        if (!hasRemovedSymbol) {
-          return current;
-        }
-
-        writeStoredStarredSymbols(next);
-        return next;
+        return Object.keys(next).length === Object.keys(current).length ? current : next;
       });
 
       if (result.length === 0) {
@@ -1061,7 +1032,7 @@ export const CryptoCandleAhrChart = () => {
         return;
       }
 
-      const indicator = calculateAhr999(candlePoints);
+      const indicator = calculateAhr999(candlePoints, 200, selectedAsset());
       const dcaCosts = calculateDcaCostSeries(candlePoints);
 
       if (indicator.length === 0 || dcaCosts.length === 0) {
@@ -1149,7 +1120,7 @@ export const CryptoCandleAhrChart = () => {
 
       const mergedCandles = [...prepend, ...existing];
       setCandles(mergedCandles);
-      setAhrPoints(calculateAhr999(mergedCandles));
+      setAhrPoints(calculateAhr999(mergedCandles, 200, selectedAsset()));
       setDcaCostPoints(calculateDcaCostSeries(mergedCandles));
       hasMoreHistory = prepend.length >= KLINE_BATCH_SIZE;
     } catch (error) {
@@ -1191,7 +1162,7 @@ export const CryptoCandleAhrChart = () => {
 
       const mergedCandles = mergeCandles(candles(), latestCandles);
       setCandles(mergedCandles);
-      setAhrPoints(calculateAhr999(mergedCandles));
+      setAhrPoints(calculateAhr999(mergedCandles, 200, selectedAsset()));
       setDcaCostPoints(calculateDcaCostSeries(mergedCandles));
     } catch (error) {
       if (!isAbortError(error)) {
@@ -1233,7 +1204,6 @@ export const CryptoCandleAhrChart = () => {
         next[normalizedSymbol] = Date.now();
       }
 
-      writeStoredStarredSymbols(next);
       return next;
     });
   };
@@ -1245,6 +1215,10 @@ export const CryptoCandleAhrChart = () => {
     }
 
     writeStoredSymbol(symbol);
+  });
+
+  createEffect(() => {
+    writeStoredStarredSymbols(starredSymbols());
   });
 
   createEffect(() => {
@@ -1358,16 +1332,6 @@ export const CryptoCandleAhrChart = () => {
         </span>
       </div>
 
-      <div class="toolbar chart-reference-toolbar">
-        <span class="refresh-badge">{copy.fixedIntervalLabel}</span>
-        <Show when={isRefreshing()}>
-          <span class="refresh-badge">{copy.refreshingData}</span>
-        </Show>
-        <span class={`history-hint ${isLoadingMore() ? "active" : ""}`}>
-          {isLoadingMore() ? copy.loadingMore : copy.loadMoreHint}
-        </span>
-      </div>
-
       <div class="chart-shell chart-reference-shell">
         <div
           class="chart-host chart-reference-host"
@@ -1455,7 +1419,19 @@ export const CryptoCandleAhrChart = () => {
             </Switch>
           </div>
         </Show>
+
+        
       </div>
+
+    <div style="margin-top: 8px">
+        <div class="toolbar chart-reference-toolbar">
+            <span class="formula-mode-badge">{valuationModeLabel()}</span>
+            <Show when={isRefreshing()}>
+            <span class="refresh-badge">{copy.refreshingData}</span>
+            </Show>
+        </div>
+      </div>
+      
     </section>
   );
 };

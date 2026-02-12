@@ -52,12 +52,14 @@ export const SearchableComboboxField = (props: SearchableComboboxFieldProps) => 
                 }
                 disabled={props.disabled}
                 onPointerDown={(event) => {
+                  const optionValue = String(itemProps.item.rawValue.value ?? "");
                   event.stopPropagation();
+                  event.preventDefault();
+                  props.onToggleOptionStar?.(optionValue);
                 }}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  props.onToggleOptionStar?.(itemProps.item.rawValue.value);
                 }}
               >
                 {itemProps.item.rawValue.isStarred ? "★" : "☆"}
