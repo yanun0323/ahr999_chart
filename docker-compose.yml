@@ -1,0 +1,10 @@
+services:
+  app:
+    container_name: ahr999-chart
+    image: ahr999-chart:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT:-5173}:8080"
+    restart: unless-stopped

@@ -56,6 +56,14 @@ body {
   flex-wrap: wrap;
 }
 
+.chart-title-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
 .chart-title-group h1 {
   margin: 0;
   font-size: 1.06rem;
@@ -74,8 +82,8 @@ body {
   justify-content: center;
   flex-wrap: wrap;
   gap: 18px;
-  margin-top: 32px;
-  margin-bottom: 8px;
+  margin-top: 16px;
+  margin-bottom: 16px;
 }
 
 .legend-item {

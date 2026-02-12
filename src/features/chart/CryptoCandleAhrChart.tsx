@@ -1395,19 +1395,19 @@ export const CryptoCandleAhrChart = () => {
         <div class="headline chart-title-group">
           <h1>{appTitle()}</h1>
           <p>{copy.appSubtitle}</p>
+            <SearchableComboboxField
+            label=''
+            options={pairOptions()}
+            value={selectedSymbol()}
+            disabled={isPairsLoading() || pairs().length === 0}
+            placeholder={copy.symbolSearchPlaceholder}
+            onToggleOptionStar={toggleStarredSymbol}
+            optionStarButtonAriaLabel={(option) =>
+                option.isStarred ? copy.unstarPairBySymbol(option.label) : copy.starPairBySymbol(option.label)
+            }
+            onChange={(value) => setSelectedSymbol(value)}
+            />
         </div>
-        <SearchableComboboxField
-          label={copy.symbolLabel}
-          options={pairOptions()}
-          value={selectedSymbol()}
-          disabled={isPairsLoading() || pairs().length === 0}
-          placeholder={copy.symbolSearchPlaceholder}
-          onToggleOptionStar={toggleStarredSymbol}
-          optionStarButtonAriaLabel={(option) =>
-            option.isStarred ? copy.unstarPairBySymbol(option.label) : copy.starPairBySymbol(option.label)
-          }
-          onChange={(value) => setSelectedSymbol(value)}
-        />
       </header>
 
       <div class="series-legend">
