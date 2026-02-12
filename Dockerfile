@@ -9,7 +9,7 @@ RUN bun install --frozen-lockfile
 COPY . .
 RUN bun run build
 
-FROM nginxinc/nginx-unprivileged:1.27.5-alpine3.20 AS runtime
+FROM nginxinc/nginx-unprivileged:1.27.5-alpine AS runtime
 USER root
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
